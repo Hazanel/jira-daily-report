@@ -1,0 +1,33 @@
+# Binaries
+jira_update
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binaries
+*.test
+*.out
+
+# Credentials - NEVER commit these!
+.env
+*.token
+*.key
+credentials.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go
+go.work
+go.work.sum
+

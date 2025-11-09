@@ -1,0 +1,42 @@
+name: Daily JIRA Report
+
+on:
+  # Run Monday-Thursday at 7:00 AM UTC
+  schedule:
+    - cron: '0 7 * * 1-4'
+  
+  # Allow manual trigger from GitHub Actions tab
+  workflow_dispatch:
+
+jobs:
+  send-jira-report:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+      
+      - name: Build application
+        run: go build -o jira_update main.go
+      
+      - name: Run JIRA report
+        env:
+          JIRA_URL: https://issues.redhat.com
+          JIRA_TOKEN: ${{ secrets.JIRA_TOKEN }}
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+        run: |
+          echo "🚀 Generating JIRA daily report..."
+          ./jira_update
+          echo "✅ Report sent successfully!"
+      
+      - name: Report failure
+        if: failure()
+        run: |
+          echo "❌ Failed to send JIRA report"
+          echo "Check the logs above for details"
+
