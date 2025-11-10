@@ -19,6 +19,21 @@ import (
 	"time"
 )
 
+// Filtering configuration - add or remove items to customize what issues are excluded from reports
+var (
+	// Components to exclude from the report (case-sensitive)
+	excludedComponents = []string{
+		"User Interface",
+	}
+
+	// Labels to exclude from the report (case-sensitive)
+	excludedLabels = []string{
+		"user-interface",
+		"mtv-storage-offload",
+		"mtv-copy-offload",
+	}
+)
+
 // JiraSearchResponse represents the response from JIRA's search API.
 // It contains a list of issues with their relevant fields.
 type JiraSearchResponse struct {
@@ -83,16 +98,32 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Send report to Slack
-	fmt.Printf("📤 Sending report to Slack at %s...\n", time.Now().Format("15:04:05"))
-	slackPayload := buildSlackBlocks(jiraURL, issues)
-	err = sendToSlackWebhook(slackWebhook, slackPayload)
-	if err != nil {
-		fmt.Printf("❌ Failed to send to Slack: %v\n", err)
-		os.Exit(1)
+	fmt.Printf("📊 Fetched %d total issues from JIRA\n", countTotalIssues(issues))
+
+	// Build and send Slack messages (may create multiple if too many issues)
+	slackPayloads := buildSlackBlocks(jiraURL, issues)
+
+	fmt.Printf("📤 Sending %d message(s) to Slack at %s...\n", len(slackPayloads), time.Now().Format("15:04:05"))
+	for i, payload := range slackPayloads {
+		blocks := payload["blocks"].([]map[string]interface{})
+		fmt.Printf("   Message %d/%d: %d blocks\n", i+1, len(slackPayloads), len(blocks))
+		err = sendToSlackWebhook(slackWebhook, payload)
+		if err != nil {
+			fmt.Printf("❌ Failed to send message %d/%d to Slack: %v\n", i+1, len(slackPayloads), err)
+			os.Exit(1)
+		}
+		fmt.Printf("   ✓ Message %d/%d sent successfully\n", i+1, len(slackPayloads))
+		// Small delay between messages to ensure proper ordering
+		if i < len(slackPayloads)-1 {
+			time.Sleep(500 * time.Millisecond)
+		}
 	}
 
-	fmt.Printf("✅ Successfully sent report with %d issues to Slack at %s\n", countTotalIssues(issues), time.Now().Format("15:04:05"))
+	if len(slackPayloads) > 1 {
+		fmt.Printf("\n✅ Successfully sent %d messages with %d issues to Slack at %s\n", len(slackPayloads), countTotalIssues(issues), time.Now().Format("15:04:05"))
+	} else {
+		fmt.Printf("\n✅ Successfully sent report with %d issues to Slack at %s\n", countTotalIssues(issues), time.Now().Format("15:04:05"))
+	}
 }
 
 // countTotalIssues returns the total number of issues across all responses.
@@ -149,21 +180,29 @@ func extractPRs(prField interface{}) []string {
 	return nil
 }
 
-// isUIRelated checks if an issue is UI-related based on its component or labels.
-// UI-related issues are filtered out from the reports.
-func isUIRelated(components []struct {
+// shouldFilterOut checks if an issue should be excluded from the report.
+// Uses the global excludedComponents and excludedLabels variables defined at the top of the file.
+func shouldFilterOut(components []struct {
 	Name string `json:"name"`
 }, labels []string) bool {
+	// Check if any component matches excluded list
 	for _, comp := range components {
-		if comp.Name == "User Interface" {
-			return true
+		for _, excluded := range excludedComponents {
+			if comp.Name == excluded {
+				return true
+			}
 		}
 	}
+
+	// Check if any label matches excluded list
 	for _, label := range labels {
-		if label == "user-interface" {
-			return true
+		for _, excluded := range excludedLabels {
+			if label == excluded {
+				return true
+			}
 		}
 	}
+
 	return false
 }
 
@@ -227,7 +266,8 @@ func fetchJiraIssues(jiraURL, jiraToken, jql string) ([]JiraSearchResponse, erro
 	return []JiraSearchResponse{result}, nil
 }
 
-// buildSlackBlocks creates a Slack Block Kit payload for the daily report.
+// buildSlackBlocks creates Slack Block Kit payloads for the daily report.
+// Returns multiple payloads if the report is too large for a single message.
 //
 // Filtering rules:
 //   - UI-related issues are excluded
@@ -235,13 +275,13 @@ func fetchJiraIssues(jiraURL, jiraToken, jql string) ([]JiraSearchResponse, erro
 //   - ON_QA and MODIFIED issues are grouped by QA Contact (if available)
 //   - Other issues are grouped by Assignee
 //
-// Slack limits messages to 50 blocks, so we cap at 48 to leave margin.
-func buildSlackBlocks(jiraURL string, responses []JiraSearchResponse) map[string]interface{} {
+// Slack limits messages to 50 blocks, so we cap at 48 per message.
+func buildSlackBlocks(jiraURL string, responses []JiraSearchResponse) []map[string]interface{} {
 	// Group issues by person (assignee or QA contact)
 	grouped := make(map[string][]IssueItem)
 	for _, resp := range responses {
 		for _, issue := range resp.Issues {
-			if isUIRelated(issue.Fields.Components, issue.Fields.Labels) {
+			if shouldFilterOut(issue.Fields.Components, issue.Fields.Labels) {
 				continue
 			}
 
@@ -274,34 +314,80 @@ func buildSlackBlocks(jiraURL string, responses []JiraSearchResponse) map[string
 	}
 	sort.Strings(assignees)
 
-	// Build Slack blocks
+	// Build Slack blocks (may create multiple messages)
 	date := time.Now().Format("Jan 2, 2006")
-	blocks := []map[string]interface{}{
-		{"type": "header", "text": map[string]string{"type": "plain_text", "text": "🧾 Daily JIRA Summary — " + date}},
-		{"type": "divider"},
+	var allPayloads []map[string]interface{}
+	var currentBlocks []map[string]interface{}
+	blockCount := 0
+	const maxBlocks = 48
+	messageNum := 1
+	assigneeIdx := 0
+
+	// Helper function to start a new message
+	startNewMessage := func(partNum int, totalParts int) {
+		if partNum == 1 {
+			// First message gets the full header
+			currentBlocks = []map[string]interface{}{
+				{"type": "header", "text": map[string]string{"type": "plain_text", "text": "🧾 Daily JIRA Summary — " + date}},
+				{"type": "divider"},
+			}
+			blockCount = 2
+		} else {
+			// Subsequent messages have no header, just continue
+			currentBlocks = []map[string]interface{}{}
+			blockCount = 0
+		}
 	}
 
-	// Track block count to respect Slack's 50 block limit
-	blockCount := 2
-	const maxBlocks = 48
+	// Helper function to finalize current message
+	finalizeMessage := func() {
+		if len(currentBlocks) > 0 { // Only save if there's any content
+			allPayloads = append(allPayloads, map[string]interface{}{"blocks": currentBlocks})
+		}
+	}
 
-	for _, assignee := range assignees {
-		if blockCount >= maxBlocks {
-			break
+	// Start first message
+	startNewMessage(1, 1)
+
+	for assigneeIdx < len(assignees) {
+		assignee := assignees[assigneeIdx]
+		issues := grouped[assignee]
+
+		// Check if we have room for at least the assignee header + one issue + divider (3 blocks)
+		if blockCount+3 > maxBlocks {
+			// Finalize current message and start a new one
+			finalizeMessage()
+			messageNum++
+			startNewMessage(messageNum, 1)
 		}
 
 		// Add assignee header
-		blocks = append(blocks, map[string]interface{}{
+		currentBlocks = append(currentBlocks, map[string]interface{}{
 			"type": "section",
 			"text": map[string]string{"type": "mrkdwn", "text": "*👤 " + assignee + "*"},
 		})
 		blockCount++
 
-		// Add each issue
-		for _, issue := range grouped[assignee] {
-			if blockCount >= maxBlocks {
-				break
+		// Add issues for this assignee
+		issueIdx := 0
+		for issueIdx < len(issues) {
+			if blockCount+1 > maxBlocks {
+				// No room for more issues, finalize and start new message
+				// Add divider before finalizing
+				currentBlocks = append(currentBlocks, map[string]interface{}{"type": "divider"})
+				finalizeMessage()
+				messageNum++
+				startNewMessage(messageNum, 1)
+
+				// Add assignee header again in new message
+				currentBlocks = append(currentBlocks, map[string]interface{}{
+					"type": "section",
+					"text": map[string]string{"type": "mrkdwn", "text": "*👤 " + assignee + "* (continued)"},
+				})
+				blockCount++
 			}
+
+			issue := issues[issueIdx]
 
 			// Format PR links for Slack
 			pr := "–"
@@ -322,19 +408,25 @@ func buildSlackBlocks(jiraURL string, responses []JiraSearchResponse) map[string
 			text := fmt.Sprintf("<%s/browse/%s|*%s*> — %s\nStatus: *%s* | PR: %s",
 				jiraURL, issue.Key, issue.Key, summary, issue.Status, pr)
 
-			blocks = append(blocks, map[string]interface{}{
+			currentBlocks = append(currentBlocks, map[string]interface{}{
 				"type": "section",
 				"text": map[string]string{"type": "mrkdwn", "text": text},
 			})
 			blockCount++
+			issueIdx++
 		}
 
 		// Add divider after each assignee
-		blocks = append(blocks, map[string]interface{}{"type": "divider"})
+		currentBlocks = append(currentBlocks, map[string]interface{}{"type": "divider"})
 		blockCount++
+
+		assigneeIdx++
 	}
 
-	return map[string]interface{}{"blocks": blocks}
+	// Finalize the last message
+	finalizeMessage()
+
+	return allPayloads
 }
 
 // escapeSlackText escapes special characters that have meaning in Slack's mrkdwn format.
