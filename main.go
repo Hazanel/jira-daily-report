@@ -1,10 +1,12 @@
 // JIRA Daily Report Generator
 //
 // This tool fetches JIRA issues from Red Hat JIRA and sends a formatted
-// daily report to a Slack channel via webhook.
+// daily report to a Slack channel as a threaded message.
 //
 // Issues are grouped by person (Assignee or QA Contact depending on status)
-// and filtered based on specific criteria.
+// and filtered based on specific criteria. The report uses Slack threads to
+// keep the channel clean - showing only the header in the channel with all
+// issue details in thread replies.
 package main
 
 import (
@@ -17,6 +19,21 @@ import (
 	"sort"
 	"strings"
 	"time"
+)
+
+// Filtering configuration - add or remove items to customize what issues are excluded from reports
+var (
+	// Components to exclude from the report (case-sensitive)
+	excludedComponents = []string{
+		"User Interface",
+	}
+
+	// Labels to exclude from the report (case-sensitive)
+	excludedLabels = []string{
+		"user-interface",
+		"mtv-storage-offload",
+		"mtv-copy-offload",
+	}
 )
 
 // JiraSearchResponse represents the response from JIRA's search API.
@@ -59,15 +76,22 @@ type IssueItem struct {
 }
 
 func main() {
+	// Run the daily JIRA report and send to Slack
+	runDailyReport()
+}
+
+// runDailyReport executes the daily JIRA report and sends to Slack
+func runDailyReport() {
 	// Configuration: Load from environment variables or use defaults
 	jiraURL := os.Getenv("JIRA_URL")
 	jiraToken := os.Getenv("JIRA_TOKEN")
-	slackWebhook := os.Getenv("SLACK_WEBHOOK")
+	slackBotToken := os.Getenv("SLACK_BOT_TOKEN")
+	slackChannel := os.Getenv("SLACK_CHANNEL")
 
 	// Validate required credentials
-	if jiraURL == "" || jiraToken == "" || slackWebhook == "" {
+	if jiraURL == "" || jiraToken == "" || slackBotToken == "" || slackChannel == "" {
 		fmt.Println("❌ Missing required credentials")
-		fmt.Println("Please set environment variables: JIRA_URL, JIRA_TOKEN, SLACK_WEBHOOK")
+		fmt.Println("Please set environment variables: JIRA_URL, JIRA_TOKEN, SLACK_BOT_TOKEN, SLACK_CHANNEL")
 		os.Exit(1)
 	}
 
@@ -83,16 +107,52 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Send report to Slack
+	fmt.Printf("📊 Fetched %d total issues from JIRA\n", countTotalIssues(issues))
+
+	// Build Slack blocks (may create multiple messages if too many issues)
+	slackPayloads := buildSlackBlocks(jiraURL, issues)
+
+	// Send messages as a thread
 	fmt.Printf("📤 Sending report to Slack at %s...\n", time.Now().Format("15:04:05"))
-	slackPayload := buildSlackBlocks(jiraURL, issues)
-	err = sendToSlackWebhook(slackWebhook, slackPayload)
-	if err != nil {
-		fmt.Printf("❌ Failed to send to Slack: %v\n", err)
-		os.Exit(1)
+
+	// Send header as main message to create the thread
+	date := time.Now().Format("Jan 2, 2006")
+	headerBlocks := []map[string]interface{}{
+		{"type": "header", "text": map[string]string{"type": "plain_text", "text": "🧾 Daily JIRA Summary — " + date}},
+		{"type": "divider"},
 	}
 
-	fmt.Printf("✅ Successfully sent report with %d issues to Slack at %s\n", countTotalIssues(issues), time.Now().Format("15:04:05"))
+	fmt.Printf("   Creating thread with header...\n")
+	threadTS, err := sendToSlackAPI(slackBotToken, slackChannel, "", headerBlocks)
+	if err != nil {
+		fmt.Printf("❌ Failed to send initial message: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("   ✓ Thread created\n")
+
+	// Send all issue details as thread replies
+	for i, payload := range slackPayloads {
+		blocks := payload["blocks"].([]map[string]interface{})
+
+		fmt.Printf("   Sending reply %d/%d with %d blocks...\n", i+1, len(slackPayloads), len(blocks))
+		_, err = sendToSlackAPI(slackBotToken, slackChannel, threadTS, blocks)
+		if err != nil {
+			fmt.Printf("❌ Failed to send reply %d/%d: %v\n", i+1, len(slackPayloads), err)
+			os.Exit(1)
+		}
+		fmt.Printf("   ✓ Reply %d/%d sent\n", i+1, len(slackPayloads))
+
+		// Small delay between messages to ensure proper ordering
+		if i < len(slackPayloads)-1 {
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
+
+	if len(slackPayloads) > 1 {
+		fmt.Printf("\n✅ Successfully sent report with %d thread replies containing %d issues\n", len(slackPayloads), countTotalIssues(issues))
+	} else {
+		fmt.Printf("\n✅ Successfully sent report with %d thread reply containing %d issues\n", len(slackPayloads), countTotalIssues(issues))
+	}
 }
 
 // countTotalIssues returns the total number of issues across all responses.
@@ -104,25 +164,63 @@ func countTotalIssues(responses []JiraSearchResponse) int {
 	return count
 }
 
-// sendToSlackWebhook sends a formatted message to Slack using an incoming webhook.
-// The payload should contain Slack Block Kit formatted blocks.
-func sendToSlackWebhook(webhookURL string, payload map[string]interface{}) error {
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("failed to marshal payload: %w", err)
+// SlackMessageResponse represents the response from Slack's chat.postMessage API
+type SlackMessageResponse struct {
+	OK      bool   `json:"ok"`
+	Error   string `json:"error"`
+	TS      string `json:"ts"`      // Thread timestamp
+	Channel string `json:"channel"` // Channel ID
+}
+
+// sendToSlackAPI sends a message to Slack using the chat.postMessage API.
+// Returns the thread timestamp (ts) for threading subsequent messages.
+func sendToSlackAPI(botToken, channel, threadTS string, blocks []map[string]interface{}) (string, error) {
+	payload := map[string]interface{}{
+		"channel":      channel,
+		"blocks":       blocks,
+		"unfurl_links": false, // Disable automatic link unfurling
+		"unfurl_media": false, // Disable automatic media unfurling
 	}
 
-	resp, err := http.Post(webhookURL, "application/json", bytes.NewBuffer(data))
+	// If threadTS is provided, send as a thread reply
+	if threadTS != "" {
+		payload["thread_ts"] = threadTS
+	}
+
+	data, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("failed to post to Slack: %w", err)
+		return "", fmt.Errorf("failed to marshal payload: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", "https://slack.com/api/chat.postMessage", bytes.NewBuffer(data))
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", botToken))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to post to Slack: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode >= 300 {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("Slack webhook returned status %d: %s", resp.StatusCode, string(bodyBytes))
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read response: %w", err)
 	}
-	return nil
+
+	var slackResp SlackMessageResponse
+	if err := json.Unmarshal(bodyBytes, &slackResp); err != nil {
+		return "", fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+
+	if !slackResp.OK {
+		return "", fmt.Errorf("Slack API error: %s", slackResp.Error)
+	}
+
+	return slackResp.TS, nil
 }
 
 // extractPRs extracts Pull Request URLs from JIRA's Git Pull Request custom field.
@@ -149,21 +247,29 @@ func extractPRs(prField interface{}) []string {
 	return nil
 }
 
-// isUIRelated checks if an issue is UI-related based on its component or labels.
-// UI-related issues are filtered out from the reports.
-func isUIRelated(components []struct {
+// shouldFilterOut checks if an issue should be excluded from the report.
+// Uses the global excludedComponents and excludedLabels variables defined at the top of the file.
+func shouldFilterOut(components []struct {
 	Name string `json:"name"`
 }, labels []string) bool {
+	// Check if any component matches excluded list
 	for _, comp := range components {
-		if comp.Name == "User Interface" {
-			return true
+		for _, excluded := range excludedComponents {
+			if comp.Name == excluded {
+				return true
+			}
 		}
 	}
+
+	// Check if any label matches excluded list
 	for _, label := range labels {
-		if label == "user-interface" {
-			return true
+		for _, excluded := range excludedLabels {
+			if label == excluded {
+				return true
+			}
 		}
 	}
+
 	return false
 }
 
@@ -227,7 +333,8 @@ func fetchJiraIssues(jiraURL, jiraToken, jql string) ([]JiraSearchResponse, erro
 	return []JiraSearchResponse{result}, nil
 }
 
-// buildSlackBlocks creates a Slack Block Kit payload for the daily report.
+// buildSlackBlocks creates Slack Block Kit payloads for the daily report.
+// Returns multiple payloads if the report is too large for a single message.
 //
 // Filtering rules:
 //   - UI-related issues are excluded
@@ -235,13 +342,13 @@ func fetchJiraIssues(jiraURL, jiraToken, jql string) ([]JiraSearchResponse, erro
 //   - ON_QA and MODIFIED issues are grouped by QA Contact (if available)
 //   - Other issues are grouped by Assignee
 //
-// Slack limits messages to 50 blocks, so we cap at 48 to leave margin.
-func buildSlackBlocks(jiraURL string, responses []JiraSearchResponse) map[string]interface{} {
+// Slack limits messages to 50 blocks, so we cap at 48 per message.
+func buildSlackBlocks(jiraURL string, responses []JiraSearchResponse) []map[string]interface{} {
 	// Group issues by person (assignee or QA contact)
 	grouped := make(map[string][]IssueItem)
 	for _, resp := range responses {
 		for _, issue := range resp.Issues {
-			if isUIRelated(issue.Fields.Components, issue.Fields.Labels) {
+			if shouldFilterOut(issue.Fields.Components, issue.Fields.Labels) {
 				continue
 			}
 
@@ -274,34 +381,67 @@ func buildSlackBlocks(jiraURL string, responses []JiraSearchResponse) map[string
 	}
 	sort.Strings(assignees)
 
-	// Build Slack blocks
-	date := time.Now().Format("Jan 2, 2006")
-	blocks := []map[string]interface{}{
-		{"type": "header", "text": map[string]string{"type": "plain_text", "text": "🧾 Daily JIRA Summary — " + date}},
-		{"type": "divider"},
+	// Build Slack blocks (may create multiple messages)
+	// Note: Header is sent separately, so all payloads here are just issue content
+	var allPayloads []map[string]interface{}
+	var currentBlocks []map[string]interface{}
+	blockCount := 0
+	const maxBlocks = 48
+	assigneeIdx := 0
+
+	// Helper function to start a new message
+	startNewMessage := func() {
+		currentBlocks = []map[string]interface{}{}
+		blockCount = 0
 	}
 
-	// Track block count to respect Slack's 50 block limit
-	blockCount := 2
-	const maxBlocks = 48
+	// Helper function to finalize current message
+	finalizeMessage := func() {
+		if len(currentBlocks) > 0 { // Only save if there's any content
+			allPayloads = append(allPayloads, map[string]interface{}{"blocks": currentBlocks})
+		}
+	}
 
-	for _, assignee := range assignees {
-		if blockCount >= maxBlocks {
-			break
+	// Start first message
+	startNewMessage()
+
+	for assigneeIdx < len(assignees) {
+		assignee := assignees[assigneeIdx]
+		issues := grouped[assignee]
+
+		// Check if we have room for at least the assignee header + one issue + divider (3 blocks)
+		if blockCount+3 > maxBlocks {
+			// Finalize current message and start a new one
+			finalizeMessage()
+			startNewMessage()
 		}
 
 		// Add assignee header
-		blocks = append(blocks, map[string]interface{}{
+		currentBlocks = append(currentBlocks, map[string]interface{}{
 			"type": "section",
 			"text": map[string]string{"type": "mrkdwn", "text": "*👤 " + assignee + "*"},
 		})
 		blockCount++
 
-		// Add each issue
-		for _, issue := range grouped[assignee] {
-			if blockCount >= maxBlocks {
-				break
+		// Add issues for this assignee
+		issueIdx := 0
+		for issueIdx < len(issues) {
+			if blockCount+1 > maxBlocks {
+				// No room for more issues, finalize and start new message
+				// Add divider before finalizing
+				currentBlocks = append(currentBlocks, map[string]interface{}{"type": "divider"})
+				finalizeMessage()
+				startNewMessage()
+
+				// Add assignee header again in new message
+				currentBlocks = append(currentBlocks, map[string]interface{}{
+					"type": "section",
+					"text": map[string]string{"type": "mrkdwn", "text": "*👤 " + assignee + "* (continued)"},
+				})
+				blockCount++
 			}
+
+			issue := issues[issueIdx]
 
 			// Format PR links for Slack
 			pr := "–"
@@ -322,19 +462,25 @@ func buildSlackBlocks(jiraURL string, responses []JiraSearchResponse) map[string
 			text := fmt.Sprintf("<%s/browse/%s|*%s*> — %s\nStatus: *%s* | PR: %s",
 				jiraURL, issue.Key, issue.Key, summary, issue.Status, pr)
 
-			blocks = append(blocks, map[string]interface{}{
+			currentBlocks = append(currentBlocks, map[string]interface{}{
 				"type": "section",
 				"text": map[string]string{"type": "mrkdwn", "text": text},
 			})
 			blockCount++
+			issueIdx++
 		}
 
 		// Add divider after each assignee
-		blocks = append(blocks, map[string]interface{}{"type": "divider"})
+		currentBlocks = append(currentBlocks, map[string]interface{}{"type": "divider"})
 		blockCount++
+
+		assigneeIdx++
 	}
 
-	return map[string]interface{}{"blocks": blocks}
+	// Finalize the last message
+	finalizeMessage()
+
+	return allPayloads
 }
 
 // escapeSlackText escapes special characters that have meaning in Slack's mrkdwn format.

@@ -28,7 +28,8 @@ jobs:
         env:
           JIRA_URL: https://issues.redhat.com
           JIRA_TOKEN: ${{ secrets.JIRA_TOKEN }}
-          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
         run: |
           echo "🚀 Generating JIRA daily report..."
           ./jira_update
