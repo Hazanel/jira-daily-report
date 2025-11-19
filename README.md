@@ -15,11 +15,14 @@ A Go tool that fetches JIRA issues and sends automated daily reports to Slack, p
 - Can be automated to run daily via GitHub Actions
 
 ### 🔍 Slash Command (On-Demand)
-- Type `/issues` to see YOUR OWN issues instantly
-- Type `/issues Isr Itl` to see someone else's issues
-- Auto-detects your name from Slack profile
-- Results shown only to you (ephemeral messages)
+- Type `/issues` to see YOUR OWN open issues instantly
+- Type `/issues John Doe` to see someone else's open issues
+- Type `/issues --all` to see ALL your issues (including closed)
+- Auto-detects your name from Slack profile (no need to type your name!)
+- Searches both assignee AND QA Contact when using `--all`
+- Results organized as threaded messages (one thread per status: Open, In Progress, Modified, Closed, Archived)
 - Always fetches fresh data from JIRA
+- Easy to scan with status-based grouping
 
 ## Requirements
 
@@ -96,8 +99,21 @@ The tool sends a formatted message to your Slack channel via webhook.
 ```
 
 Then in Slack, users can type:
-- `/issues` - See your own issues
-- `/issues Isr Itl` - See someone else's issues
+- `/issues` - See your own **open** issues (auto-detected from Slack profile)
+- `/issues John Doe` - See John Doe's **open** issues
+- `/issues --all` - See **ALL** your issues (including closed)
+- `/issues John Doe --all` - See **ALL** John Doe's issues
+- `/issues --all John Doe` - Same as above (order doesn't matter)
+
+**🧵 Thread Organization:**
+- Results are posted as threaded messages in the configured Slack channel
+- Main message shows a summary with issue counts per status
+- Each status (Open, In Progress, Modified, Closed, Archived) gets its own thread reply
+- Easy to navigate and keeps the channel clean!
+
+**🔍 Search Behavior:**
+- Without `--all`: Searches **assignee only**, filters open/active statuses
+- With `--all`: Searches **both assignee AND QA Contact**, includes all statuses
 
 **📖 For deployment instructions, see the guides below**
 

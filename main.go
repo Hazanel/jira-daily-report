@@ -40,7 +40,10 @@ var (
 // JiraSearchResponse represents the response from JIRA's search API.
 // It contains a list of issues with their relevant fields.
 type JiraSearchResponse struct {
-	Issues []struct {
+	Total      int `json:"total"`
+	StartAt    int `json:"startAt"`
+	MaxResults int `json:"maxResults"`
+	Issues     []struct {
 		Key    string `json:"key"`
 		Fields struct {
 			Summary string `json:"summary"`
@@ -292,56 +295,74 @@ func shouldFilterOut(components []struct {
 //
 // Returns up to 500 issues matching the query.
 func fetchJiraIssues(jiraURL, jiraToken, jql string) ([]JiraSearchResponse, error) {
-	// Prepare the search request
-	requestBody := map[string]interface{}{
-		"jql":        jql,
-		"maxResults": 500,
-		"fields": []string{
-			"summary",
-			"status",
-			"assignee",
-			"customfield_12315948", // QA Contact
-			"issuetype",
-			"components",
-			"labels",
-			"customfield_12310220", // Git Pull Request
-		},
+	var allResults []JiraSearchResponse
+	startAt := 0
+	maxResults := 100 // Fetch in batches of 100
+
+	for {
+		// Prepare the search request with pagination
+		requestBody := map[string]interface{}{
+			"jql":        jql,
+			"startAt":    startAt,
+			"maxResults": maxResults,
+			"fields": []string{
+				"summary",
+				"status",
+				"assignee",
+				"customfield_12315948", // QA Contact
+				"issuetype",
+				"components",
+				"labels",
+				"customfield_12310220", // Git Pull Request
+			},
+		}
+
+		body, err := json.Marshal(requestBody)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal request: %w", err)
+		}
+
+		req, err := http.NewRequest("POST", fmt.Sprintf("%s/rest/api/2/search", jiraURL), bytes.NewBuffer(body))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create request: %w", err)
+		}
+
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", jiraToken))
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to execute request: %w", err)
+		}
+
+		responseBody, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("failed to read response: %w", err)
+		}
+
+		if resp.StatusCode != 200 {
+			return nil, fmt.Errorf("JIRA API returned %d: %s", resp.StatusCode, string(responseBody))
+		}
+
+		var result JiraSearchResponse
+		if err := json.Unmarshal(responseBody, &result); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+		}
+
+		allResults = append(allResults, result)
+
+		// Check if we've fetched all results
+		if startAt+len(result.Issues) >= result.Total {
+			fmt.Printf("      Fetched all %d issues from JIRA\n", result.Total)
+			break
+		}
+
+		fmt.Printf("      Fetched %d/%d issues, continuing...\n", startAt+len(result.Issues), result.Total)
+		startAt += maxResults
 	}
 
-	body, err := json.Marshal(requestBody)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	req, err := http.NewRequest("POST", fmt.Sprintf("%s/rest/api/2/search", jiraURL), bytes.NewBuffer(body))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", jiraToken))
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to execute request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	responseBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("JIRA API returned %d: %s", resp.StatusCode, string(responseBody))
-	}
-
-	var result JiraSearchResponse
-	if err := json.Unmarshal(responseBody, &result); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-	}
-
-	return []JiraSearchResponse{result}, nil
+	return allResults, nil
 }
 
 // buildSlackBlocks creates Slack Block Kit payloads for the daily report.
