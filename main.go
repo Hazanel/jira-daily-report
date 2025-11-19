@@ -12,6 +12,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -76,7 +77,17 @@ type IssueItem struct {
 }
 
 func main() {
-	// Run the daily JIRA report and send to Slack
+	// Command-line flags
+	serverMode := flag.Bool("server", false, "Run as slash command server instead of daily report")
+	flag.Parse()
+
+	// Server mode: Start HTTP server for slash commands
+	if *serverMode {
+		startSlashCommandServer()
+		return
+	}
+
+	// Daily report mode: Run once and exit
 	runDailyReport()
 }
 

@@ -1,0 +1,108 @@
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: jira-slash-secrets
+type: Opaque
+stringData:
+  JIRA_URL: "https://issues.redhat.com"
+  JIRA_TOKEN: "YOUR_JIRA_TOKEN_HERE"
+  SLACK_BOT_TOKEN: "YOUR_SLACK_BOT_TOKEN_HERE"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jira-slash-command
+  labels:
+    app: jira-slash-command
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jira-slash-command
+  template:
+    metadata:
+      labels:
+        app: jira-slash-command
+    spec:
+      containers:
+      - name: jira-slash-command
+        image: quay.io/username/jira-slash-command:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+          protocol: TCP
+        env:
+        - name: JIRA_URL
+          valueFrom:
+            secretKeyRef:
+              name: jira-slash-secrets
+              key: JIRA_URL
+        - name: JIRA_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: jira-slash-secrets
+              key: JIRA_TOKEN
+        - name: SLACK_BOT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: jira-slash-secrets
+              key: SLACK_BOT_TOKEN
+        - name: PORT
+          value: "8080"
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jira-slash-command
+  labels:
+    app: jira-slash-command
+spec:
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+    protocol: TCP
+  selector:
+    app: jira-slash-command
+
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: jira-slash-command
+  labels:
+    app: jira-slash-command
+spec:
+  to:
+    kind: Service
+    name: jira-slash-command
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Allow
+
+
+
