@@ -1,0 +1,20 @@
+name: Keep Render Warm
+
+on:
+  schedule:
+    # Every 14 minutes, Monday-Thursday, 7 AM - 7 PM UTC
+    # Cron format: minute hour day month day-of-week
+    # 1-4 = Monday-Thursday
+    - cron: '0,14,28,42,56 7-18 * * 1-4'
+  workflow_dispatch:  # Allows manual triggering from GitHub Actions UI
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping health endpoint
+        run: |
+          echo "🏓 Pinging Render service to keep it warm..."
+          curl -f https://jira-daily-report.onrender.com/health || echo "⚠️ Ping failed (service might be deploying)"
+          echo "✅ Ping complete"
+
