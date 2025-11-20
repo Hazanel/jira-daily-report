@@ -3,18 +3,22 @@
 // This server handles Slack slash commands to filter JIRA issues by user.
 // Users can run commands like:
 //
-//	/issues                  - Shows YOUR OWN open issues (auto-detected from Slack)
-//	/issues John Doe         - Shows John Doe's open issues
-//	/issues --all            - Shows ALL your issues (including closed)
-//	/issues John Doe --all   - Shows ALL John Doe's issues
-//	/issues --all John Doe   - Same as above (order doesn't matter)
+//	/issues                     - Shows YOUR OWN open issues (auto-detected from Slack)
+//	/issues John Doe            - Shows John Doe's open issues
+//	/issues --all               - Shows ALL your issues (including closed)
+//	/issues John Doe --all      - Shows ALL John Doe's issues
+//	/issues --modified          - Shows only Modified status issues
+//	/issues --closed            - Shows only Closed status issues
+//	/issues --new               - Shows only New status issues
+//	/issues --in-progress       - Shows only In Progress status issues
+//	/issues --on-qa             - Shows only ON_QA status issues
+//	/issues --verified          - Shows only Verified status issues
+//	/issues John Doe --modified - Shows John Doe's Modified issues
+//	/issues --all John Doe      - Order doesn't matter
 //
-// Results are organized in threaded messages:
-// - Main message: Summary with issue counts per status
-// - Thread replies: One reply per status (Open, In Progress, Modified, Closed, Archived)
+// Results are shown as ephemeral (private) messages organized by status.
 //
-// The server fetches fresh JIRA data for each request and posts results
-// to the configured SLACK_CHANNEL (visible to all channel members).
+// The server fetches fresh JIRA data for each request.
 package main
 
 import (
@@ -153,9 +157,35 @@ func processSlashCommand(cmd SlackSlashCommand) {
 		return
 	}
 
-	// Parse the command text for --all flag and username
+	// Parse the command text for flags and username
 	text := strings.TrimSpace(cmd.Text)
 	includeAll := strings.Contains(text, "--all")
+
+	// Check for status-specific flags
+	// Note: Status names must match JIRA's exact status values (case-sensitive!)
+	statusFilter := ""
+	statusFlags := map[string]string{
+		"--modified":        "MODIFIED",        // Uppercase in JIRA
+		"--closed":          "Closed",          // Title case
+		"--new":             "New",             // Title case
+		"--open":            "Open",            // Title case
+		"--in-progress":     "In Progress",     // Title case with space
+		"--on-qa":           "ON_QA",           // Uppercase
+		"--post":            "POST",            // Uppercase
+		"--verified":        "Verified",        // Title case
+		"--done":            "Done",            // Title case
+		"--archived":        "Archived",        // Title case
+		"--assigned":        "ASSIGNED",        // Uppercase
+		"--release-pending": "Release Pending", // Title case with space
+	}
+
+	for flag, status := range statusFlags {
+		if strings.Contains(text, flag) {
+			statusFilter = status
+			text = strings.ReplaceAll(text, flag, "")
+			break // Only one status filter at a time
+		}
+	}
 
 	// Remove --all from text to get username
 	username := strings.TrimSpace(strings.ReplaceAll(text, "--all", ""))
@@ -172,14 +202,20 @@ func processSlashCommand(cmd SlackSlashCommand) {
 		fmt.Printf("   Auto-detected user: %s (Slack: @%s, ID: %s)\n", username, cmd.UserName, cmd.UserID)
 	}
 
-	if includeAll {
+	if statusFilter != "" {
+		displayStatus := statusFilter
+		if statusFilter == "MODIFIED" {
+			displayStatus = "Modified"
+		}
+		fmt.Printf("   Fetching %s issues for %s...\n", displayStatus, username)
+	} else if includeAll {
 		fmt.Printf("   Fetching ALL issues (including closed) for %s...\n", username)
 	} else {
 		fmt.Printf("   Fetching open issues for %s...\n", username)
 	}
 
-	// Build JQL based on --all flag
-	jql := buildJQLQuery(username, includeAll)
+	// Build JQL based on flags
+	jql := buildJQLQueryWithStatus(username, includeAll, statusFilter)
 	fmt.Printf("   JQL: %s\n", jql)
 	issues, err := fetchJiraIssues(jiraURL, jiraToken, jql)
 	if err != nil {
@@ -199,11 +235,21 @@ func processSlashCommand(cmd SlackSlashCommand) {
 		return
 	}
 
+	// Check if we have results (status filter already applied in JQL)
+	if statusFilter != "" && len(userIssues) == 0 {
+		displayStatus := statusFilter
+		if statusFilter == "MODIFIED" {
+			displayStatus = "Modified"
+		}
+		sendErrorResponse(cmd.ResponseURL, fmt.Sprintf("No *%s* issues found for: *%s*", displayStatus, username))
+		return
+	}
+
 	// Group issues by status
 	statusGroups := groupIssuesByStatus(userIssues)
 
 	// Build ephemeral response (private, only visible to user)
-	blocks := buildEphemeralStatusBlocks(jiraURL, username, statusGroups, includeAll)
+	blocks := buildEphemeralStatusBlocks(jiraURL, username, statusGroups, includeAll, statusFilter)
 
 	err = sendSlackResponse(cmd.ResponseURL, SlackSlashResponse{
 		ResponseType: "ephemeral",
@@ -217,12 +263,16 @@ func processSlashCommand(cmd SlackSlashCommand) {
 	fmt.Printf("✅ Sent %d issues for %s to @%s (ephemeral)\n", len(userIssues), username, cmd.UserName)
 }
 
-// buildJQLQuery constructs the JQL query based on user and --all flag
+// buildJQLQueryWithStatus constructs the JQL query based on flags
 // NOTE: User filtering is done in Go code, not in JQL, to support display names
-func buildJQLQuery(username string, includeAll bool) string {
+func buildJQLQueryWithStatus(username string, includeAll bool, statusFilter string) string {
 	jql := "project = MTV"
 
-	if includeAll {
+	if statusFilter != "" {
+		// Specific status requested - add it to JQL
+		jql += fmt.Sprintf(" AND status = \"%s\"", statusFilter)
+		jql += " ORDER BY updated DESC"
+	} else if includeAll {
 		// Include all statuses - filtering by user happens in filterIssuesByUser()
 		jql += " ORDER BY status ASC, updated DESC"
 	} else {
@@ -232,6 +282,11 @@ func buildJQLQuery(username string, includeAll bool) string {
 	}
 
 	return jql
+}
+
+// buildJQLQuery is a wrapper for backward compatibility (used by main.go)
+func buildJQLQuery(username string, includeAll bool) string {
+	return buildJQLQueryWithStatus(username, includeAll, "")
 }
 
 // groupIssuesByStatus groups issues by their status
@@ -245,7 +300,7 @@ func groupIssuesByStatus(issues []IssueItem) map[string][]IssueItem {
 
 // buildEphemeralStatusBlocks creates a flat ephemeral message organized by status
 // Respects Slack's 50 block limit by truncating if needed
-func buildEphemeralStatusBlocks(jiraURL, username string, statusGroups map[string][]IssueItem, includeAll bool) []map[string]interface{} {
+func buildEphemeralStatusBlocks(jiraURL, username string, statusGroups map[string][]IssueItem, includeAll bool, statusFilter string) []map[string]interface{} {
 	// Status order
 	statusOrder := []string{"Open", "In Progress", "Modified", "Closed", "Archived", "POST", "ON_QA", "MODIFIED", "Verified", "Done"}
 
@@ -277,8 +332,16 @@ func buildEphemeralStatusBlocks(jiraURL, username string, statusGroups map[strin
 		}
 	}
 
+	// Build title based on filters
 	title := fmt.Sprintf("🔍 Issues for %s", username)
-	if includeAll {
+	if statusFilter != "" {
+		// Display friendly status name (title case instead of UPPERCASE)
+		displayStatus := statusFilter
+		if statusFilter == "MODIFIED" {
+			displayStatus = "Modified"
+		}
+		title = fmt.Sprintf("🔍 %s Issues for %s", displayStatus, username)
+	} else if includeAll {
 		title = fmt.Sprintf("🔍 All Issues for %s", username)
 	}
 
@@ -310,6 +373,96 @@ func buildEphemeralStatusBlocks(jiraURL, username string, statusGroups map[strin
 	for _, status := range statusOrder {
 		issues, exists := statusGroups[status]
 		if !exists {
+			continue
+		}
+
+		// Check if we have room for at least the status header + 1 issue
+		if currentBlocks+2 > maxBlocks {
+			if !truncated {
+				remainingIssues := totalIssues - issuesShown
+				blocks = append(blocks, map[string]interface{}{
+					"type": "section",
+					"text": map[string]string{
+						"type": "mrkdwn",
+						"text": fmt.Sprintf("\n_...and %d more issue(s) not shown_", remainingIssues),
+					},
+				})
+				truncated = true
+			}
+			break
+		}
+
+		// Add status header
+		blocks = append(blocks, map[string]interface{}{
+			"type": "section",
+			"text": map[string]string{
+				"type": "mrkdwn",
+				"text": fmt.Sprintf("\n📂 *%s* (%d)", status, len(issues)),
+			},
+		})
+		currentBlocks++
+
+		// Add issues for this status
+		for i, issue := range issues {
+			if currentBlocks >= maxBlocks {
+				if !truncated {
+					remainingInStatus := len(issues) - i
+					remainingTotal := totalIssues - issuesShown
+					blocks = append(blocks, map[string]interface{}{
+						"type": "section",
+						"text": map[string]string{
+							"type": "mrkdwn",
+							"text": fmt.Sprintf("_...and %d more in this status (%d total remaining)_",
+								remainingInStatus, remainingTotal),
+						},
+					})
+					truncated = true
+				}
+				break
+			}
+
+			// Format PR links
+			pr := "–"
+			if len(issue.GitPullRequest) > 0 {
+				var prLinks []string
+				for j, prURL := range issue.GitPullRequest {
+					prLinks = append(prLinks, fmt.Sprintf("<%s|PR%d>", prURL, j+1))
+				}
+				pr = strings.Join(prLinks, " ")
+			}
+
+			// Escape and truncate summary
+			summary := escapeSlackText(issue.Summary)
+			if len(summary) > 100 {
+				summary = summary[:100] + "..."
+			}
+
+			text := fmt.Sprintf("• <%s/browse/%s|*%s*> — %s\n   *Status:* %s  |  *PR:* %s",
+				jiraURL, issue.Key, issue.Key, summary, issue.Status, pr)
+
+			blocks = append(blocks, map[string]interface{}{
+				"type": "section",
+				"text": map[string]string{
+					"type": "mrkdwn",
+					"text": text,
+				},
+			})
+			currentBlocks++
+			issuesShown++
+		}
+	}
+
+	// Add any statuses not in predefined order
+	for status, issues := range statusGroups {
+		// Skip if already processed
+		found := false
+		for _, s := range statusOrder {
+			if s == status {
+				found = true
+				break
+			}
+		}
+		if found {
 			continue
 		}
 

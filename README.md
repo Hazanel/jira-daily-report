@@ -18,9 +18,19 @@ A Go tool that fetches JIRA issues and sends automated daily reports to Slack, p
 - Type `/issues` to see YOUR OWN open issues instantly
 - Type `/issues John Doe` to see someone else's open issues
 - Type `/issues --all` to see ALL your issues (including closed)
+- **Status-specific filters:**
+  - `/issues --modified` → Only Modified issues
+  - `/issues --closed` → Only Closed issues
+  - `/issues --new` → Only New issues
+  - `/issues --open` → Only Open issues
+  - `/issues --in-progress` → Only In Progress issues
+  - `/issues --on-qa` → Only ON_QA issues
+  - `/issues --verified` → Only Verified issues
+  - `/issues --done` → Only Done issues
+  - Works with names too: `/issues John Doe --modified`
 - Auto-detects your name from Slack profile (no need to type your name!)
-- Searches both assignee AND QA Contact when using `--all`
-- Results organized as threaded messages (one thread per status: Open, In Progress, Modified, Closed, Archived)
+- Searches both assignee AND QA Contact
+- Results shown as private (ephemeral) messages organized by status
 - Always fetches fresh data from JIRA
 - Easy to scan with status-based grouping
 
@@ -99,21 +109,34 @@ The tool sends a formatted message to your Slack channel via webhook.
 ```
 
 Then in Slack, users can type:
+
+**Basic Usage:**
 - `/issues` - See your own **open** issues (auto-detected from Slack profile)
 - `/issues John Doe` - See John Doe's **open** issues
 - `/issues --all` - See **ALL** your issues (including closed)
 - `/issues John Doe --all` - See **ALL** John Doe's issues
-- `/issues --all John Doe` - Same as above (order doesn't matter)
 
-**🧵 Thread Organization:**
-- Results are posted as threaded messages in the configured Slack channel
-- Main message shows a summary with issue counts per status
-- Each status (Open, In Progress, Modified, Closed, Archived) gets its own thread reply
-- Easy to navigate and keeps the channel clean!
+**Status-Specific Filters:**
+- `/issues --modified` - Only your Modified issues
+- `/issues --closed` - Only your Closed issues
+- `/issues --new` - Only your New issues
+- `/issues --open` - Only your Open issues
+- `/issues --in-progress` - Only your In Progress issues
+- `/issues --on-qa` - Only your ON_QA issues
+- `/issues --verified` - Only your Verified issues
+- `/issues --done` - Only your Done issues
+- `/issues John Doe --modified` - John Doe's Modified issues (works with any name)
 
-**🔍 Search Behavior:**
-- Without `--all`: Searches **assignee only**, filters open/active statuses
-- With `--all`: Searches **both assignee AND QA Contact**, includes all statuses
+**💡 Tips:**
+- Order doesn't matter: `/issues --all John Doe` = `/issues John Doe --all`
+- Auto-detection: Just type `/issues --closed` (no need to add your name)
+- Private results: All responses are ephemeral (only you see them)
+
+**📊 Result Organization:**
+- Results shown as a single ephemeral message (private, only visible to you)
+- Issues grouped and sorted by status
+- Summary at the top shows total issues and counts per status
+- Respects Slack's 50-block limit with smart truncation
 
 **📖 For deployment instructions, see the guides below**
 

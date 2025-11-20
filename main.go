@@ -123,8 +123,8 @@ func runDailyReport() {
 
 	fmt.Printf("📊 Fetched %d total issues from JIRA\n", countTotalIssues(issues))
 
-	// Build Slack blocks (may create multiple messages if too many issues)
-	slackPayloads := buildSlackBlocks(jiraURL, issues)
+	// Group issues by person and status
+	personStatusGroups := buildPersonStatusGroups(issues)
 
 	// Send messages as a thread
 	fmt.Printf("📤 Sending report to Slack at %s...\n", time.Now().Format("15:04:05"))
@@ -144,29 +144,14 @@ func runDailyReport() {
 	}
 	fmt.Printf("   ✓ Thread created\n")
 
-	// Send all issue details as thread replies
-	for i, payload := range slackPayloads {
-		blocks := payload["blocks"].([]map[string]interface{})
-
-		fmt.Printf("   Sending reply %d/%d with %d blocks...\n", i+1, len(slackPayloads), len(blocks))
-		_, err = sendToSlackAPI(slackBotToken, slackChannel, threadTS, blocks)
-		if err != nil {
-			fmt.Printf("❌ Failed to send reply %d/%d: %v\n", i+1, len(slackPayloads), err)
-			os.Exit(1)
-		}
-		fmt.Printf("   ✓ Reply %d/%d sent\n", i+1, len(slackPayloads))
-
-		// Small delay between messages to ensure proper ordering
-		if i < len(slackPayloads)-1 {
-			time.Sleep(500 * time.Millisecond)
-		}
+	// Send each person's issues organized by status
+	err = sendDailyReportThreaded(slackBotToken, slackChannel, threadTS, jiraURL, personStatusGroups)
+	if err != nil {
+		fmt.Printf("❌ Failed to send threaded report: %v\n", err)
+		os.Exit(1)
 	}
 
-	if len(slackPayloads) > 1 {
-		fmt.Printf("\n✅ Successfully sent report with %d thread replies containing %d issues\n", len(slackPayloads), countTotalIssues(issues))
-	} else {
-		fmt.Printf("\n✅ Successfully sent report with %d thread reply containing %d issues\n", len(slackPayloads), countTotalIssues(issues))
-	}
+	fmt.Printf("\n✅ Successfully sent daily report with %d issues\n", countTotalIssues(issues))
 }
 
 // countTotalIssues returns the total number of issues across all responses.
@@ -375,9 +360,19 @@ func fetchJiraIssues(jiraURL, jiraToken, jql string) ([]JiraSearchResponse, erro
 //   - Other issues are grouped by Assignee
 //
 // Slack limits messages to 50 blocks, so we cap at 48 per message.
-func buildSlackBlocks(jiraURL string, responses []JiraSearchResponse) []map[string]interface{} {
-	// Group issues by person (assignee or QA contact)
-	grouped := make(map[string][]IssueItem)
+
+// PersonStatusGroup represents issues for one person, grouped by status
+type PersonStatusGroup struct {
+	Person       string
+	StatusGroups map[string][]IssueItem
+	TotalIssues  int
+}
+
+// buildPersonStatusGroups groups issues by person, then by status
+func buildPersonStatusGroups(responses []JiraSearchResponse) []PersonStatusGroup {
+	// First group by person
+	personIssues := make(map[string][]IssueItem)
+
 	for _, resp := range responses {
 		for _, issue := range resp.Issues {
 			if shouldFilterOut(issue.Fields.Components, issue.Fields.Labels) {
@@ -397,7 +392,7 @@ func buildSlackBlocks(jiraURL string, responses []JiraSearchResponse) []map[stri
 				assignee = issue.Fields.Assignee.DisplayName
 			}
 
-			grouped[assignee] = append(grouped[assignee], IssueItem{
+			personIssues[assignee] = append(personIssues[assignee], IssueItem{
 				Key:            issue.Key,
 				Summary:        issue.Fields.Summary,
 				Status:         issue.Fields.Status.Name,
@@ -406,113 +401,184 @@ func buildSlackBlocks(jiraURL string, responses []JiraSearchResponse) []map[stri
 		}
 	}
 
-	// Sort assignees alphabetically
-	var assignees []string
-	for a := range grouped {
-		assignees = append(assignees, a)
+	// Sort people alphabetically
+	var people []string
+	for person := range personIssues {
+		people = append(people, person)
 	}
-	sort.Strings(assignees)
+	sort.Strings(people)
 
-	// Build Slack blocks (may create multiple messages)
-	// Note: Header is sent separately, so all payloads here are just issue content
-	var allPayloads []map[string]interface{}
-	var currentBlocks []map[string]interface{}
-	blockCount := 0
-	const maxBlocks = 48
-	assigneeIdx := 0
+	// Group each person's issues by status
+	var result []PersonStatusGroup
+	for _, person := range people {
+		issues := personIssues[person]
+		statusGroups := make(map[string][]IssueItem)
 
-	// Helper function to start a new message
-	startNewMessage := func() {
-		currentBlocks = []map[string]interface{}{}
-		blockCount = 0
-	}
-
-	// Helper function to finalize current message
-	finalizeMessage := func() {
-		if len(currentBlocks) > 0 { // Only save if there's any content
-			allPayloads = append(allPayloads, map[string]interface{}{"blocks": currentBlocks})
-		}
-	}
-
-	// Start first message
-	startNewMessage()
-
-	for assigneeIdx < len(assignees) {
-		assignee := assignees[assigneeIdx]
-		issues := grouped[assignee]
-
-		// Check if we have room for at least the assignee header + one issue + divider (3 blocks)
-		if blockCount+3 > maxBlocks {
-			// Finalize current message and start a new one
-			finalizeMessage()
-			startNewMessage()
+		for _, issue := range issues {
+			statusGroups[issue.Status] = append(statusGroups[issue.Status], issue)
 		}
 
-		// Add assignee header
-		currentBlocks = append(currentBlocks, map[string]interface{}{
-			"type": "section",
-			"text": map[string]string{"type": "mrkdwn", "text": "*👤 " + assignee + "*"},
+		result = append(result, PersonStatusGroup{
+			Person:       person,
+			StatusGroups: statusGroups,
+			TotalIssues:  len(issues),
 		})
-		blockCount++
-
-		// Add issues for this assignee
-		issueIdx := 0
-		for issueIdx < len(issues) {
-			if blockCount+1 > maxBlocks {
-				// No room for more issues, finalize and start new message
-				// Add divider before finalizing
-				currentBlocks = append(currentBlocks, map[string]interface{}{"type": "divider"})
-				finalizeMessage()
-				startNewMessage()
-
-				// Add assignee header again in new message
-				currentBlocks = append(currentBlocks, map[string]interface{}{
-					"type": "section",
-					"text": map[string]string{"type": "mrkdwn", "text": "*👤 " + assignee + "* (continued)"},
-				})
-				blockCount++
-			}
-
-			issue := issues[issueIdx]
-
-			// Format PR links for Slack
-			pr := "–"
-			if len(issue.GitPullRequest) > 0 {
-				var prLinks []string
-				for i, prURL := range issue.GitPullRequest {
-					prLinks = append(prLinks, fmt.Sprintf("<%s|PR%d>", prURL, i+1))
-				}
-				pr = strings.Join(prLinks, " ")
-			}
-
-			// Escape special characters and truncate long summaries
-			summary := escapeSlackText(issue.Summary)
-			if len(summary) > 200 {
-				summary = summary[:200] + "..."
-			}
-
-			text := fmt.Sprintf("<%s/browse/%s|*%s*> — %s\nStatus: *%s* | PR: %s",
-				jiraURL, issue.Key, issue.Key, summary, issue.Status, pr)
-
-			currentBlocks = append(currentBlocks, map[string]interface{}{
-				"type": "section",
-				"text": map[string]string{"type": "mrkdwn", "text": text},
-			})
-			blockCount++
-			issueIdx++
-		}
-
-		// Add divider after each assignee
-		currentBlocks = append(currentBlocks, map[string]interface{}{"type": "divider"})
-		blockCount++
-
-		assigneeIdx++
 	}
 
-	// Finalize the last message
-	finalizeMessage()
+	return result
+}
 
-	return allPayloads
+// sendDailyReportThreaded sends the daily report as threaded messages per person/status
+func sendDailyReportThreaded(botToken, channel, threadTS, jiraURL string, personGroups []PersonStatusGroup) error {
+	statusOrder := []string{"In Progress", "Modified", "POST", "ON_QA", "MODIFIED", "Open", "Closed", "Archived"}
+
+	messageCount := 0
+	separator := "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+	for _, group := range personGroups {
+		// Build ONE message with person header + all their statuses
+		blocks := []map[string]interface{}{}
+
+		// Add top separator for first person only
+		if messageCount == 0 {
+			blocks = append(blocks, map[string]interface{}{
+				"type": "section",
+				"text": map[string]string{
+					"type": "mrkdwn",
+					"text": separator,
+				},
+			})
+		}
+
+		// Add person header with bottom separator
+		blocks = append(blocks, map[string]interface{}{
+			"type": "section",
+			"text": map[string]string{
+				"type": "mrkdwn",
+				"text": fmt.Sprintf("*👤 %s* (%d issue(s))\n%s", group.Person, group.TotalIssues, separator),
+			},
+		})
+		// Add all statuses and their issues to the blocks
+		for _, status := range statusOrder {
+			issues, exists := group.StatusGroups[status]
+			if !exists {
+				continue
+			}
+
+			// Add status header (indented with non-breaking spaces)
+			blocks = append(blocks, map[string]interface{}{
+				"type": "section",
+				"text": map[string]string{
+					"type": "mrkdwn",
+					"text": fmt.Sprintf("\n\u00A0\u00A0\u00A0📂 *%s* (%d)", status, len(issues)),
+				},
+			})
+
+			// Add issues for this status (more indented with non-breaking spaces)
+			for _, issue := range issues {
+				pr := "–"
+				if len(issue.GitPullRequest) > 0 {
+					var prLinks []string
+					for i, prURL := range issue.GitPullRequest {
+						prLinks = append(prLinks, fmt.Sprintf("<%s|PR%d>", prURL, i+1))
+					}
+					pr = strings.Join(prLinks, " ")
+				}
+
+				summary := escapeSlackText(issue.Summary)
+				if len(summary) > 65 {
+					summary = summary[:65] + "..."
+				}
+
+				text := fmt.Sprintf("\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0• <%s/browse/%s|*%s*> — %s\n\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0*Status:* %s  |  *PR:* %s",
+					jiraURL, issue.Key, issue.Key, summary, issue.Status, pr)
+
+				blocks = append(blocks, map[string]interface{}{
+					"type": "section",
+					"text": map[string]string{
+						"type": "mrkdwn",
+						"text": text,
+					},
+				})
+			}
+		}
+
+		// Add any statuses not in predefined order
+		for status, issues := range group.StatusGroups {
+			found := false
+			for _, s := range statusOrder {
+				if s == status {
+					found = true
+					break
+				}
+			}
+			if found {
+				continue
+			}
+
+			// Add status header (indented with non-breaking spaces)
+			blocks = append(blocks, map[string]interface{}{
+				"type": "section",
+				"text": map[string]string{
+					"type": "mrkdwn",
+					"text": fmt.Sprintf("\n\u00A0\u00A0\u00A0📂 *%s* (%d)", status, len(issues)),
+				},
+			})
+
+			// Add issues for this status (more indented with non-breaking spaces)
+			for _, issue := range issues {
+				pr := "–"
+				if len(issue.GitPullRequest) > 0 {
+					var prLinks []string
+					for i, prURL := range issue.GitPullRequest {
+						prLinks = append(prLinks, fmt.Sprintf("<%s|PR%d>", prURL, i+1))
+					}
+					pr = strings.Join(prLinks, " ")
+				}
+
+				summary := escapeSlackText(issue.Summary)
+				if len(summary) > 65 {
+					summary = summary[:65] + "..."
+				}
+
+				text := fmt.Sprintf("\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0• <%s/browse/%s|*%s*> — %s\n\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0*Status:* %s  |  *PR:* %s",
+					jiraURL, issue.Key, issue.Key, summary, issue.Status, pr)
+
+				blocks = append(blocks, map[string]interface{}{
+					"type": "section",
+					"text": map[string]string{
+						"type": "mrkdwn",
+						"text": text,
+					},
+				})
+			}
+		}
+
+		// Add closing separator
+		blocks = append(blocks, map[string]interface{}{
+			"type": "section",
+			"text": map[string]string{
+				"type": "mrkdwn",
+				"text": fmt.Sprintf("\n%s", separator),
+			},
+		})
+
+		// Send the complete message for this person
+		messageCount++
+		fmt.Printf("   Sending reply %d/%d: %s with all statuses...\n", messageCount, len(personGroups), group.Person)
+		_, err := sendToSlackAPI(botToken, channel, threadTS, blocks)
+		if err != nil {
+			return fmt.Errorf("failed to send message for %s: %w", group.Person, err)
+		}
+		fmt.Printf("   ✓ Reply %d/%d sent\n", messageCount, len(personGroups))
+
+		// Small delay between people
+		if messageCount < len(personGroups) {
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
+
+	return nil
 }
 
 // escapeSlackText escapes special characters that have meaning in Slack's mrkdwn format.
