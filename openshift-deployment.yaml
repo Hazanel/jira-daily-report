@@ -5,7 +5,8 @@ metadata:
   name: jira-slash-secrets
 type: Opaque
 stringData:
-  JIRA_URL: "https://issues.redhat.com"
+  JIRA_URL: "https://redhat.atlassian.net"
+  JIRA_EMAIL: "YOUR_JIRA_EMAIL_HERE"
   JIRA_TOKEN: "YOUR_JIRA_TOKEN_HERE"
   SLACK_BOT_TOKEN: "YOUR_SLACK_BOT_TOKEN_HERE"
 
@@ -39,6 +40,11 @@ spec:
             secretKeyRef:
               name: jira-slash-secrets
               key: JIRA_URL
+        - name: JIRA_EMAIL
+          valueFrom:
+            secretKeyRef:
+              name: jira-slash-secrets
+              key: JIRA_EMAIL
         - name: JIRA_TOKEN
           valueFrom:
             secretKeyRef:

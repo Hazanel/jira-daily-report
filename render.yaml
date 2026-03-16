@@ -7,7 +7,9 @@ services:
     autoDeploy: true
     envVars:
       - key: JIRA_URL
-        value: https://issues.redhat.com
+        value: https://redhat.atlassian.net
+      - key: JIRA_EMAIL
+        sync: false  # Will be set manually in Render dashboard
       - key: JIRA_TOKEN
         sync: false  # Will be set manually in Render dashboard
       - key: SLACK_BOT_TOKEN
