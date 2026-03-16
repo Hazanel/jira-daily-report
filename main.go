@@ -111,7 +111,7 @@ func runDailyReport() {
 	// 1. Issues with status: POST, ON_QA, or MODIFIED
 	// 2. Epics that are not Closed (will be filtered for PRs later)
 	// Excludes UI-related issues (filtered in code)
-	jql := `project = MTV AND (status IN (POST, ON_QA, MODIFIED) OR (type = Epic AND status != Closed)) ORDER BY assignee`
+	jql := `project = MTV AND updated >= -365d AND (status IN (POST, ON_QA, MODIFIED) OR (type = Epic AND status != Closed)) ORDER BY assignee`
 
 	issues, err := fetchJiraIssues(jiraURL, jiraToken, jql)
 	if err != nil {

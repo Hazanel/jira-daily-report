@@ -269,15 +269,12 @@ func buildJQLQueryWithStatus(username string, includeAll bool, statusFilter stri
 	jql := "project = MTV"
 
 	if statusFilter != "" {
-		// Specific status requested - add it to JQL
 		jql += fmt.Sprintf(" AND status = \"%s\"", statusFilter)
-		jql += " ORDER BY updated DESC"
+		jql += " AND updated >= -365d ORDER BY updated DESC"
 	} else if includeAll {
-		// Include all statuses - filtering by user happens in filterIssuesByUser()
-		jql += " ORDER BY status ASC, updated DESC"
+		jql += " AND updated >= -365d ORDER BY status ASC, updated DESC"
 	} else {
-		// Only open/active statuses
-		jql += " AND (status IN (POST, ON_QA, MODIFIED) OR (type = Epic AND status != Closed))"
+		jql += " AND updated >= -365d AND (status IN (POST, ON_QA, MODIFIED) OR (type = Epic AND status != Closed))"
 		jql += " ORDER BY status ASC"
 	}
 
