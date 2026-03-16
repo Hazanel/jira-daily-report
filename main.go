@@ -37,13 +37,11 @@ var (
 	}
 )
 
-// JiraSearchResponse represents the response from JIRA's search API.
+// JiraSearchResponse represents the response from JIRA's /rest/api/3/search/jql API.
 // It contains a list of issues with their relevant fields.
 type JiraSearchResponse struct {
-	Total      int `json:"total"`
-	StartAt    int `json:"startAt"`
-	MaxResults int `json:"maxResults"`
-	Issues     []struct {
+	NextPageToken string `json:"nextPageToken,omitempty"`
+	Issues        []struct {
 		Key    string `json:"key"`
 		Fields struct {
 			Summary string `json:"summary"`
@@ -272,23 +270,22 @@ func shouldFilterOut(components []struct {
 	return false
 }
 
-// fetchJiraIssues queries JIRA API and returns matching issues.
+// fetchJiraIssues queries JIRA's /rest/api/3/search/jql endpoint and returns matching issues.
 // Parameters:
 //   - jiraURL: Base URL of the JIRA instance (e.g., https://issues.redhat.com)
 //   - jiraToken: Bearer token for authentication
 //   - jql: JQL query string to filter issues
 //
-// Returns up to 500 issues matching the query.
+// Paginates using nextPageToken until all results are fetched.
 func fetchJiraIssues(jiraURL, jiraToken, jql string) ([]JiraSearchResponse, error) {
 	var allResults []JiraSearchResponse
-	startAt := 0
-	maxResults := 100 // Fetch in batches of 100
+	maxResults := 100
+	nextPageToken := ""
+	totalFetched := 0
 
 	for {
-		// Prepare the search request with pagination
 		requestBody := map[string]interface{}{
 			"jql":        jql,
-			"startAt":    startAt,
 			"maxResults": maxResults,
 			"fields": []string{
 				"summary",
@@ -302,12 +299,16 @@ func fetchJiraIssues(jiraURL, jiraToken, jql string) ([]JiraSearchResponse, erro
 			},
 		}
 
+		if nextPageToken != "" {
+			requestBody["nextPageToken"] = nextPageToken
+		}
+
 		body, err := json.Marshal(requestBody)
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal request: %w", err)
 		}
 
-		req, err := http.NewRequest("POST", fmt.Sprintf("%s/rest/api/2/search", jiraURL), bytes.NewBuffer(body))
+		req, err := http.NewRequest("POST", fmt.Sprintf("%s/rest/api/3/search/jql", jiraURL), bytes.NewBuffer(body))
 		if err != nil {
 			return nil, fmt.Errorf("failed to create request: %w", err)
 		}
@@ -336,15 +337,15 @@ func fetchJiraIssues(jiraURL, jiraToken, jql string) ([]JiraSearchResponse, erro
 		}
 
 		allResults = append(allResults, result)
+		totalFetched += len(result.Issues)
 
-		// Check if we've fetched all results
-		if startAt+len(result.Issues) >= result.Total {
-			fmt.Printf("      Fetched all %d issues from JIRA\n", result.Total)
+		if result.NextPageToken == "" {
+			fmt.Printf("      Fetched all %d issues from JIRA\n", totalFetched)
 			break
 		}
 
-		fmt.Printf("      Fetched %d/%d issues, continuing...\n", startAt+len(result.Issues), result.Total)
-		startAt += maxResults
+		fmt.Printf("      Fetched %d issues so far, continuing...\n", totalFetched)
+		nextPageToken = result.NextPageToken
 	}
 
 	return allResults, nil
