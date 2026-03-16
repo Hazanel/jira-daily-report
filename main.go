@@ -11,6 +11,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -270,10 +271,23 @@ func shouldFilterOut(components []struct {
 	return false
 }
 
+// setJiraAuth sets the appropriate Authorization header for the JIRA request.
+// Uses Basic auth (email:token) for Atlassian Cloud when JIRA_EMAIL is set,
+// otherwise falls back to Bearer token auth for Data Center.
+func setJiraAuth(req *http.Request, jiraToken string) {
+	jiraEmail := os.Getenv("JIRA_EMAIL")
+	if jiraEmail != "" {
+		credentials := base64.StdEncoding.EncodeToString([]byte(jiraEmail + ":" + jiraToken))
+		req.Header.Set("Authorization", "Basic "+credentials)
+	} else {
+		req.Header.Set("Authorization", "Bearer "+jiraToken)
+	}
+}
+
 // fetchJiraIssues queries JIRA's /rest/api/3/search/jql endpoint and returns matching issues.
 // Parameters:
-//   - jiraURL: Base URL of the JIRA instance (e.g., https://issues.redhat.com)
-//   - jiraToken: Bearer token for authentication
+//   - jiraURL: Base URL of the JIRA instance (e.g., https://redhat.atlassian.net)
+//   - jiraToken: API token for authentication
 //   - jql: JQL query string to filter issues
 //
 // Paginates using nextPageToken until all results are fetched.
@@ -313,7 +327,7 @@ func fetchJiraIssues(jiraURL, jiraToken, jql string) ([]JiraSearchResponse, erro
 			return nil, fmt.Errorf("failed to create request: %w", err)
 		}
 
-		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", jiraToken))
+		setJiraAuth(req, jiraToken)
 		req.Header.Set("Content-Type", "application/json")
 
 		resp, err := http.DefaultClient.Do(req)

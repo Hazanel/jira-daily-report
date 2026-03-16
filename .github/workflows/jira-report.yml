@@ -26,7 +26,8 @@ jobs:
       
       - name: Run JIRA report
         env:
-          JIRA_URL: https://issues.redhat.com
+          JIRA_URL: https://redhat.atlassian.net
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
           JIRA_TOKEN: ${{ secrets.JIRA_TOKEN }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
